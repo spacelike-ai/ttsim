@@ -2056,12 +2056,16 @@ TENSIX_EXECUTE_PACR() {
                  (pack_fmt_conv_mode == 0x155) || (pack_fmt_conv_mode == 0x166) || (pack_fmt_conv_mode == 0x167) ||
                  (pack_fmt_conv_mode == 0x188) || (pack_fmt_conv_mode == 0x199) || (pack_fmt_conv_mode == 0x1EE),
         UnimplementedFunctionality, "pack_fmt_conv_mode=0x%x", pack_fmt_conv_mode);
+    bool round_10b_mant = p_config->PCK_DEST_RD_CTRL_Round_10b_mant;
     if (pack_fmt_conv_mode == 0x111) {
-        TTSIM_VERIFY(p_config->PCK_DEST_RD_CTRL_Round_10b_mant, UnsupportedFunctionality,
-            "pack_fmt_conv_mode=0x%x round_10b_mant=%d", pack_fmt_conv_mode, p_config->PCK_DEST_RD_CTRL_Round_10b_mant);
-    } else {
-        TTSIM_VERIFY(!p_config->PCK_DEST_RD_CTRL_Round_10b_mant, UnimplementedFunctionality,
-            "pack_fmt_conv_mode=0x%x round_10b_mant=%d", pack_fmt_conv_mode, p_config->PCK_DEST_RD_CTRL_Round_10b_mant);
+        TTSIM_VERIFY(round_10b_mant, UnsupportedFunctionality,
+            "pack_fmt_conv_mode=0x%x round_10b_mant=%d", pack_fmt_conv_mode, round_10b_mant);
+    } else if (!(pack_fmt_conv_mode & 0x100)) {
+        // Round_10b_mant rounds the fp32 dest datum to a 10-bit mantissa; it is only meaningful
+        // when reading 32-bit (fp32) dest data, so forbid it for 16-bit dest reads. When it is set
+        // (fp32 dest), the rounding is applied in the Read_32b_data path below.
+        TTSIM_VERIFY(!round_10b_mant, UnimplementedFunctionality,
+            "pack_fmt_conv_mode=0x%x round_10b_mant=%d", pack_fmt_conv_mode, round_10b_mant);
     }
     uint32_t src_element_size_bits = get_element_size(pack_src_format);
     uint32_t dst_element_size_bits = get_element_size(pack_dst_format);
@@ -2220,6 +2224,18 @@ TENSIX_EXECUTE_PACR() {
                         value >>= 16; // XXX tt-isa-docs calls this mode out as "No", should this case be illegal?
                     } else {
                         value = dst_decode_fp32(value);
+                        // Round_10b_mant: round the fp32 dest datum to a 10-bit mantissa (round to
+                        // nearest, ties up -- matching the packer's other rounding conventions in
+                        // this file) before the format-specific conversion below. This is the
+                        // general form of the fp16-output case: for fp32->bf16/bfp8 it produces a
+                        // double rounding, for fp32->fp16 it turns the later mantissa truncation
+                        // into a round. Skips integer formats. intermediate_format 1 (TF32, arch1)
+                        // already rounds to a 10-bit mantissa, so it is excluded here.
+                        if (round_10b_mant && (intermediate_format != 1) && (intermediate_format != 14)) {
+                            if ((value & 0x7FFFFFFF) < 0x7F800000) { // finite (skip inf/nan)
+                                value = (value + 0x1000) & ~0x1FFFu;
+                            }
+                        }
                         if ((intermediate_format == 5) || (intermediate_format == 6)) {
                             TTSIM_VERIFY(!read_raw, UnimplementedFunctionality, "fp32 to bf16/bfp8: read_raw=%d", read_raw);
                             if ((value & 0x7FFFFFFF) > 0x7F800000) {
